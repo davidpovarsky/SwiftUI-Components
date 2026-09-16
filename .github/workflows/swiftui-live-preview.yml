@@ -1,0 +1,322 @@
+name: Live SwiftUI Preview
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_repo:
+        description: "Public GitHub repo in owner/name form"
+        required: true
+        default: "amosgyamfi/open-swiftui-animations"
+        type: string
+      source_ref:
+        description: "Branch, tag, or commit"
+        required: true
+        default: "master"
+        type: string
+      swift_file:
+        description: "Path to a Swift file containing #Preview or PreviewProvider"
+        required: true
+        default: "Gists_To_Try/FlowerAnimation.swift"
+        type: string
+      preview_index:
+        description: "Preview index (0 = first preview)"
+        required: false
+        default: "0"
+        type: string
+      duration_minutes:
+        description: "Keep the browser preview alive for 5-45 minutes"
+        required: false
+        default: "20"
+        type: string
+      auto_sync:
+        description: "Poll the source branch every 15s and hot-reload pushed changes"
+        required: false
+        default: false
+        type: boolean
+  push:
+    branches: [main]
+    paths:
+      - ".github/workflows/swiftui-live-preview.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  preview:
+    name: SwiftUI preview in browser
+    runs-on: macos-26
+    timeout-minutes: 55
+    env:
+      SOURCE_REPO: ${{ github.event_name == 'workflow_dispatch' && inputs.source_repo || 'amosgyamfi/open-swiftui-animations' }}
+      SOURCE_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.source_ref || 'master' }}
+      SWIFT_FILE: ${{ github.event_name == 'workflow_dispatch' && inputs.swift_file || 'Gists_To_Try/FlowerAnimation.swift' }}
+      PREVIEW_INDEX: ${{ github.event_name == 'workflow_dispatch' && inputs.preview_index || '0' }}
+      DURATION_MINUTES: ${{ github.event_name == 'workflow_dispatch' && inputs.duration_minutes || '6' }}
+      AUTO_SYNC: ${{ github.event_name == 'workflow_dispatch' && inputs.auto_sync || 'false' }}
+
+    steps:
+      - name: Select Xcode and verify simulator runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          XCODE_APP="$(python3 - <<'PY'
+          from pathlib import Path
+          import re
+
+          candidates = []
+          for p in Path('/Applications').glob('Xcode*.app'):
+              m = re.search(r'Xcode[_-]?(\d+(?:\.\d+)*)', p.name)
+              if m:
+                  version = tuple(int(x) for x in m.group(1).split('.'))
+                  if version and version[0] >= 26:
+                      candidates.append((version, str(p)))
+          if candidates:
+              print(max(candidates)[1])
+          elif Path('/Applications/Xcode.app').exists():
+              print('/Applications/Xcode.app')
+          PY
+          )"
+
+          if [[ -z "$XCODE_APP" ]]; then
+            echo "No Xcode 26+ installation found on this runner."
+            exit 1
+          fi
+
+          sudo xcode-select -s "$XCODE_APP/Contents/Developer"
+          xcodebuild -version
+          echo "Architecture: $(uname -m)"
+
+          if ! xcrun simctl list runtimes | grep -q "iOS 26"; then
+            echo "iOS 26 runtime not present; downloading it..."
+            xcodebuild -downloadPlatform iOS
+          fi
+
+          xcrun simctl list runtimes | grep "iOS 26" || true
+
+      - name: Install preview and streaming tools
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew tap obj-p/tap
+          brew install previewsmcp
+          brew install cloudflared caddy
+          previewsmcp help >/dev/null
+          node --version
+          npx -y serve-sim@latest --help >/dev/null
+
+      - name: Clone source repository
+        shell: bash
+        run: |
+          set -euo pipefail
+          git clone --filter=blob:none "https://github.com/${SOURCE_REPO}.git" source
+          git -C source fetch --depth=1 origin "$SOURCE_REF"
+          git -C source checkout --detach FETCH_HEAD
+
+          TARGET="$GITHUB_WORKSPACE/source/$SWIFT_FILE"
+          if [[ ! -f "$TARGET" ]]; then
+            echo "Swift file not found: $SWIFT_FILE"
+            exit 1
+          fi
+
+          echo "Target: $TARGET"
+          if ! grep -Eq '#Preview|PreviewProvider' "$TARGET"; then
+            echo "The selected file does not contain #Preview or PreviewProvider."
+            exit 1
+          fi
+
+      - name: Start the real iOS SwiftUI preview
+        id: preview
+        shell: bash
+        run: |
+          set -euo pipefail
+          TARGET="$GITHUB_WORKSPACE/source/$SWIFT_FILE"
+
+          cd "$GITHUB_WORKSPACE/source"
+          previewsmcp run "$TARGET" --platform ios --detach --json | tee /tmp/previewsmcp-session.json
+
+          if [[ "$PREVIEW_INDEX" =~ ^[0-9]+$ ]] && [[ "$PREVIEW_INDEX" != "0" ]]; then
+            previewsmcp switch "$PREVIEW_INDEX" --file "$TARGET"
+          fi
+
+          previewsmcp status --json || true
+          previewsmcp simulators --json | tee /tmp/previewsmcp-simulators.json
+
+      - name: Start browser stream
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          nohup npx -y serve-sim@latest --codec mjpeg --fit --panes devices,tools -p 3200 \
+            >/tmp/serve-sim.log 2>&1 &
+          echo $! >/tmp/serve-sim.pid
+
+          for _ in $(seq 1 90); do
+            if curl -fsS http://127.0.0.1:3200/.sim >/dev/null 2>&1 || curl -fsS http://127.0.0.1:3200 >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+
+          if ! kill -0 "$(cat /tmp/serve-sim.pid)" 2>/dev/null; then
+            echo "serve-sim exited unexpectedly"
+            cat /tmp/serve-sim.log
+            exit 1
+          fi
+
+          tail -n 30 /tmp/serve-sim.log || true
+
+      - name: Protect preview with temporary Basic Auth
+        id: auth
+        shell: bash
+        run: |
+          set -euo pipefail
+          USERNAME="viewer"
+          PASSWORD="$(python3 - <<'PY'
+          import secrets
+          print(secrets.token_urlsafe(12))
+          PY
+          )"
+          HASH="$(caddy hash-password --plaintext "$PASSWORD")"
+
+          cat >/tmp/Caddyfile <<EOF
+          :3300 {
+            basic_auth {
+              $USERNAME $HASH
+            }
+            reverse_proxy 127.0.0.1:3200
+          }
+          EOF
+
+          nohup caddy run --config /tmp/Caddyfile --adapter caddyfile \
+            >/tmp/caddy.log 2>&1 &
+          echo $! >/tmp/caddy.pid
+
+          for _ in $(seq 1 30); do
+            if curl -fsS -u "$USERNAME:$PASSWORD" http://127.0.0.1:3300/.sim >/dev/null 2>&1 || \
+               curl -fsS -u "$USERNAME:$PASSWORD" http://127.0.0.1:3300 >/dev/null 2>&1; then
+              break
+            fi
+            sleep 1
+          done
+
+          echo "username=$USERNAME" >> "$GITHUB_OUTPUT"
+          echo "password=$PASSWORD" >> "$GITHUB_OUTPUT"
+
+      - name: Open temporary Cloudflare tunnel
+        id: tunnel
+        shell: bash
+        run: |
+          set -euo pipefail
+          nohup cloudflared tunnel --url http://127.0.0.1:3300 --no-autoupdate \
+            >/tmp/cloudflared.log 2>&1 &
+          echo $! >/tmp/cloudflared.pid
+
+          URL=""
+          for _ in $(seq 1 60); do
+            URL="$(grep -Eo 'https://[-a-z0-9]+\.trycloudflare\.com' /tmp/cloudflared.log | head -1 || true)"
+            if [[ -n "$URL" ]]; then
+              break
+            fi
+            sleep 1
+          done
+
+          if [[ -z "$URL" ]]; then
+            echo "Cloudflare tunnel URL was not created."
+            cat /tmp/cloudflared.log
+            exit 1
+          fi
+
+          USERNAME='${{ steps.auth.outputs.username }}'
+          PASSWORD='${{ steps.auth.outputs.password }}'
+
+          echo "url=$URL/.sim" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## Live SwiftUI Preview"
+            echo
+            echo "**Source:** \`$SOURCE_REPO@$SOURCE_REF\`"
+            echo
+            echo "**File:** \`$SWIFT_FILE\`"
+            echo
+            echo "### Open on iPhone/iPad/Mac"
+            echo
+            echo "$URL/.sim"
+            echo
+            echo "**Username:** \`$USERNAME\`"
+            echo
+            echo "**Password:** \`$PASSWORD\`"
+            echo
+            echo "> This is a temporary authenticated tunnel to a real iOS Simulator. It disappears when this workflow ends or is cancelled."
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          echo "Preview URL: $URL/.sim"
+          echo "Username: $USERNAME"
+          echo "Password: $PASSWORD"
+
+      - name: Verify the public endpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          URL='${{ steps.tunnel.outputs.url }}'
+          USERNAME='${{ steps.auth.outputs.username }}'
+          PASSWORD='${{ steps.auth.outputs.password }}'
+
+          for _ in $(seq 1 20); do
+            if curl -fsS -u "$USERNAME:$PASSWORD" "$URL" >/dev/null 2>&1; then
+              echo "Public preview endpoint is reachable."
+              exit 0
+            fi
+            sleep 2
+          done
+
+          echo "Public preview endpoint failed its reachability check."
+          exit 1
+
+      - name: Auto-sync source branch for hot reload
+        if: ${{ env.AUTO_SYNC == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          (
+            cd "$GITHUB_WORKSPACE/source"
+            while true; do
+              sleep 15
+              git fetch --depth=1 origin "$SOURCE_REF" >/dev/null 2>&1 || continue
+              CURRENT="$(git rev-parse HEAD)"
+              NEW="$(git rev-parse FETCH_HEAD)"
+              if [[ "$CURRENT" != "$NEW" ]]; then
+                echo "Source changed: $CURRENT -> $NEW"
+                git reset --hard FETCH_HEAD
+              fi
+            done
+          ) >/tmp/source-sync.log 2>&1 &
+          echo $! >/tmp/source-sync.pid
+
+      - name: Keep the live preview available
+        shell: bash
+        run: |
+          set -euo pipefail
+          MINUTES="$DURATION_MINUTES"
+          if ! [[ "$MINUTES" =~ ^[0-9]+$ ]]; then MINUTES=20; fi
+          if (( MINUTES < 5 )); then MINUTES=5; fi
+          if (( MINUTES > 45 )); then MINUTES=45; fi
+
+          echo "Preview is live for $MINUTES minutes. Cancel this workflow when finished."
+          for ((i=MINUTES; i>0; i--)); do
+            echo "$i minute(s) remaining..."
+            sleep 60
+          done
+
+      - name: Diagnostics on failure
+        if: failure()
+        shell: bash
+        run: |
+          echo "===== PreviewsMCP ====="
+          previewsmcp logs -n 200 || true
+          echo "===== serve-sim ====="
+          cat /tmp/serve-sim.log 2>/dev/null || true
+          echo "===== Caddy ====="
+          cat /tmp/caddy.log 2>/dev/null || true
+          echo "===== cloudflared ====="
+          cat /tmp/cloudflared.log 2>/dev/null || true
