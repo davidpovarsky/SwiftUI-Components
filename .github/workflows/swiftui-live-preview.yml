@@ -18,6 +18,14 @@ on:
         required: true
         default: "ShipSwift/SWPackage/SWComponent/Display/SWGradientDivider.swift"
         type: string
+      context:
+        description: "standalone = original file only; project = resolve its original Xcode/SPM project"
+        required: true
+        default: "standalone"
+        type: choice
+        options:
+          - standalone
+          - project
       duration_minutes:
         description: "Keep the live preview available for 5-45 minutes"
         required: false
@@ -40,6 +48,7 @@ jobs:
       SOURCE_REPO: ${{ github.event_name == 'workflow_dispatch' && inputs.source_repo || 'signerlabs/ShipSwift' }}
       SOURCE_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.source_ref || 'main' }}
       SWIFT_FILE: ${{ github.event_name == 'workflow_dispatch' && inputs.swift_file || 'ShipSwift/SWPackage/SWComponent/Display/SWGradientDivider.swift' }}
+      PREVIEW_CONTEXT: ${{ github.event_name == 'workflow_dispatch' && inputs.context || 'standalone' }}
       DURATION_MINUTES: ${{ github.event_name == 'workflow_dispatch' && inputs.duration_minutes || '8' }}
 
     steps:
@@ -78,34 +87,47 @@ jobs:
           previewsmcp help >/dev/null
           npx -y serve-sim@latest --help >/dev/null
 
-      - name: Clone original repository
+      - name: Clone original repository and select file
         shell: bash
         run: |
           set -euo pipefail
           git clone --filter=blob:none "https://github.com/${SOURCE_REPO}.git" source
           git -C source fetch --depth=1 origin "$SOURCE_REF"
           git -C source checkout --detach FETCH_HEAD
-          TARGET="$GITHUB_WORKSPACE/source/$SWIFT_FILE"
-          test -f "$TARGET" || { echo "File not found: $SWIFT_FILE"; exit 1; }
-          grep -Eq '#Preview|PreviewProvider' "$TARGET" || { echo "No SwiftUI preview declaration in $SWIFT_FILE"; exit 1; }
-          echo "PREVIEW_TARGET=$TARGET" >> "$GITHUB_ENV"
+          ORIGINAL="$GITHUB_WORKSPACE/source/$SWIFT_FILE"
+          test -f "$ORIGINAL" || { echo "File not found: $SWIFT_FILE"; exit 1; }
+          grep -Eq '#Preview|PreviewProvider' "$ORIGINAL" || { echo "No SwiftUI preview declaration in $SWIFT_FILE"; exit 1; }
 
-          # ShipSwift intentionally keeps this local-only secrets file out of git.
-          # The upstream example contains placeholder values and lets Xcode resolve
-          # the original project without changing the selected source file.
-          if [[ "$SOURCE_REPO" == "signerlabs/ShipSwift" && ! -f "$GITHUB_WORKSPACE/source/ShipSwift/SWSecrets.swift" && -f "$GITHUB_WORKSPACE/source/SWSecrets.swift.example" ]]; then
-            cp "$GITHUB_WORKSPACE/source/SWSecrets.swift.example" "$GITHUB_WORKSPACE/source/ShipSwift/SWSecrets.swift"
+          ORIGINAL_SHA="$(shasum -a 256 "$ORIGINAL" | awk '{print $1}')"
+          echo "Original file SHA256: $ORIGINAL_SHA"
+
+          if [[ "$PREVIEW_CONTEXT" == "standalone" ]]; then
+            PREVIEW_DIR="$RUNNER_TEMP/OriginalSwiftFile"
+            rm -rf "$PREVIEW_DIR"
+            mkdir -p "$PREVIEW_DIR"
+            cp -p "$ORIGINAL" "$PREVIEW_DIR/$(basename "$ORIGINAL")"
+            PREVIEW_TARGET="$PREVIEW_DIR/$(basename "$ORIGINAL")"
+            cmp -s "$ORIGINAL" "$PREVIEW_TARGET"
+            COPY_SHA="$(shasum -a 256 "$PREVIEW_TARGET" | awk '{print $1}')"
+            [[ "$COPY_SHA" == "$ORIGINAL_SHA" ]]
+            echo "Preview mode: standalone, byte-for-byte original Swift file, no Package.swift and no generated app project."
+          else
+            PREVIEW_DIR="$GITHUB_WORKSPACE/source"
+            PREVIEW_TARGET="$ORIGINAL"
+            if [[ "$SOURCE_REPO" == "signerlabs/ShipSwift" && ! -f "$GITHUB_WORKSPACE/source/ShipSwift/SWSecrets.swift" && -f "$GITHUB_WORKSPACE/source/SWSecrets.swift.example" ]]; then
+              cp "$GITHUB_WORKSPACE/source/SWSecrets.swift.example" "$GITHUB_WORKSPACE/source/ShipSwift/SWSecrets.swift"
+            fi
+            echo "Preview mode: original repository project context."
           fi
 
-          echo "Original file SHA256: $(shasum -a 256 "$TARGET" | awk '{print $1}')"
-          echo "Xcode containers found:"
-          find "$GITHUB_WORKSPACE/source" -maxdepth 2 \( -name '*.xcodeproj' -o -name '*.xcworkspace' -o -name 'Package.swift' \) -print
+          echo "PREVIEW_DIR=$PREVIEW_DIR" >> "$GITHUB_ENV"
+          echo "PREVIEW_TARGET=$PREVIEW_TARGET" >> "$GITHUB_ENV"
 
       - name: Start original SwiftUI preview on real iOS Simulator
         shell: bash
         run: |
           set -euo pipefail
-          cd "$GITHUB_WORKSPACE/source"
+          cd "$PREVIEW_DIR"
           previewsmcp kill-daemon >/dev/null 2>&1 || true
           previewsmcp list "$PREVIEW_TARGET"
 
@@ -117,7 +139,9 @@ jobs:
 
           FINISHED=false
           RC=0
-          for _ in $(seq 1 240); do
+          LIMIT=180
+          if [[ "$PREVIEW_CONTEXT" == "project" ]]; then LIMIT=600; fi
+          for _ in $(seq 1 "$LIMIT"); do
             if ! kill -0 "$PID" 2>/dev/null; then
               set +e
               wait "$PID"
@@ -130,7 +154,7 @@ jobs:
           done
 
           if [[ "$FINISHED" != "true" ]]; then
-            echo "PreviewsMCP did not finish startup within 4 minutes."
+            echo "PreviewsMCP startup timeout after ${LIMIT}s."
             previewsmcp status --json || true
             previewsmcp logs -n 250 || true
             ps -ef | grep -E 'previewsmcp|xcodebuild|swiftc' | grep -v grep || true
@@ -143,7 +167,6 @@ jobs:
             previewsmcp logs -n 250 || true
             exit "$RC"
           fi
-
           previewsmcp status --json || true
           previewsmcp simulators --json | tee /tmp/simulators.json
 
@@ -206,13 +229,11 @@ jobs:
             sleep 1
           done
           [[ -n "$URL" ]] || { cat /tmp/cloudflared.log; exit 1; }
-
           USERNAME='${{ steps.auth.outputs.username }}'
           PASSWORD='${{ steps.auth.outputs.password }}'
           LIVE="$URL/.sim"
           echo "url=$LIVE" >> "$GITHUB_OUTPUT"
           echo "::notice title=LIVE SWIFTUI PREVIEW::$LIVE | Username: $USERNAME | Password: $PASSWORD"
-
           {
             echo "## Live SwiftUI Preview"
             echo
