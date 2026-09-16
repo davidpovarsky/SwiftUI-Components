@@ -144,9 +144,14 @@ jobs:
           EOF
             cp -p "$ORIGINAL" "$PKG/Sources/PreviewTarget/SelectedPreview.swift"
             cmp -s "$ORIGINAL" "$PKG/Sources/PreviewTarget/SelectedPreview.swift"
+            cat >"$PKG/Sources/PreviewTarget/PreviewSupport.swift" <<'EOF'
+          // Preview-only support file. The selected upstream Swift file stays byte-for-byte unchanged.
+          enum __PreviewSupport {}
+          EOF
             echo "PREVIEW_ROOT=$PKG" >> "$GITHUB_ENV"
             echo "PREVIEW_TARGET=$PKG/Sources/PreviewTarget/SelectedPreview.swift" >> "$GITHUB_ENV"
             echo "Using byte-for-byte original file in an isolated SPM context."
+            echo "Added an inert second source so PreviewsMCP uses its Tier-2 project build path."
           else
             echo "PREVIEW_ROOT=$GITHUB_WORKSPACE/source" >> "$GITHUB_ENV"
             echo "PREVIEW_TARGET=$ORIGINAL" >> "$GITHUB_ENV"
