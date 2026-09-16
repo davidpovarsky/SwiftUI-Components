@@ -16,7 +16,7 @@ on:
       swift_file:
         description: "Path to a Swift file containing #Preview or PreviewProvider"
         required: true
-        default: "Gists_To_Try/FlowerAnimation.swift"
+        default: "Gists_To_Try/ThreeWaysToAnimate.swift"
         type: string
       preview_index:
         description: "Preview index (0 = first preview)"
@@ -49,7 +49,7 @@ jobs:
     env:
       SOURCE_REPO: ${{ github.event_name == 'workflow_dispatch' && inputs.source_repo || 'amosgyamfi/open-swiftui-animations' }}
       SOURCE_REF: ${{ github.event_name == 'workflow_dispatch' && inputs.source_ref || 'master' }}
-      SWIFT_FILE: ${{ github.event_name == 'workflow_dispatch' && inputs.swift_file || 'Gists_To_Try/FlowerAnimation.swift' }}
+      SWIFT_FILE: ${{ github.event_name == 'workflow_dispatch' && inputs.swift_file || 'Gists_To_Try/ThreeWaysToAnimate.swift' }}
       PREVIEW_INDEX: ${{ github.event_name == 'workflow_dispatch' && inputs.preview_index || '0' }}
       DURATION_MINUTES: ${{ github.event_name == 'workflow_dispatch' && inputs.duration_minutes || '6' }}
       AUTO_SYNC: ${{ github.event_name == 'workflow_dispatch' && inputs.auto_sync || 'false' }}
@@ -99,6 +99,7 @@ jobs:
         run: |
           set -euo pipefail
           brew tap obj-p/tap
+          brew trust obj-p/tap
           brew install previewsmcp
           brew install cloudflared caddy
           previewsmcp help >/dev/null
