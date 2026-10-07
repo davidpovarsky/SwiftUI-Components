@@ -6,7 +6,6 @@ on:
       - "CI"
       - "Live SwiftUI Preview"
     types:
-      - requested
       - in_progress
       - completed
 
