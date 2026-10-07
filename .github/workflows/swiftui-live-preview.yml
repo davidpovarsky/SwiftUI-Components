@@ -37,6 +37,7 @@ on:
       - ".github/workflows/swiftui-live-preview.yml"
 
 permissions:
+  actions: read
   contents: read
 
 jobs:
@@ -52,6 +53,14 @@ jobs:
       DURATION_MINUTES: ${{ github.event_name == 'workflow_dispatch' && inputs.duration_minutes || '8' }}
 
     steps:
+      - name: Live Activity · refresh
+        uses: davidpovarsky/github-automation/live-refresh@main
+        continue-on-error: true
+        with:
+          event: refresh
+          device_id: ${{ secrets.NOTIFY_DEVICE_ID }}
+          token: ${{ secrets.NOTIFY_DEVICE_TOKEN }}
+          github_token: ${{ github.token }}
       - name: Select Xcode and iOS runtime
         shell: bash
         run: |
@@ -77,6 +86,14 @@ jobs:
             xcodebuild -downloadPlatform iOS
           fi
 
+      - name: Live Activity · refresh
+        uses: davidpovarsky/github-automation/live-refresh@main
+        continue-on-error: true
+        with:
+          event: refresh
+          device_id: ${{ secrets.NOTIFY_DEVICE_ID }}
+          token: ${{ secrets.NOTIFY_DEVICE_TOKEN }}
+          github_token: ${{ github.token }}
       - name: Install preview and browser-stream tools
         shell: bash
         run: |
@@ -87,6 +104,14 @@ jobs:
           previewsmcp help >/dev/null
           npx -y serve-sim@latest --help >/dev/null
 
+      - name: Live Activity · refresh
+        uses: davidpovarsky/github-automation/live-refresh@main
+        continue-on-error: true
+        with:
+          event: refresh
+          device_id: ${{ secrets.NOTIFY_DEVICE_ID }}
+          token: ${{ secrets.NOTIFY_DEVICE_TOKEN }}
+          github_token: ${{ github.token }}
       - name: Clone original repository and select file
         shell: bash
         run: |
@@ -123,6 +148,14 @@ jobs:
           echo "PREVIEW_DIR=$PREVIEW_DIR" >> "$GITHUB_ENV"
           echo "PREVIEW_TARGET=$PREVIEW_TARGET" >> "$GITHUB_ENV"
 
+      - name: Live Activity · refresh
+        uses: davidpovarsky/github-automation/live-refresh@main
+        continue-on-error: true
+        with:
+          event: refresh
+          device_id: ${{ secrets.NOTIFY_DEVICE_ID }}
+          token: ${{ secrets.NOTIFY_DEVICE_TOKEN }}
+          github_token: ${{ github.token }}
       - name: Start original SwiftUI preview on real iOS Simulator
         shell: bash
         run: |
@@ -170,6 +203,14 @@ jobs:
           previewsmcp status --json || true
           previewsmcp simulators --json | tee /tmp/simulators.json
 
+      - name: Live Activity · refresh
+        uses: davidpovarsky/github-automation/live-refresh@main
+        continue-on-error: true
+        with:
+          event: refresh
+          device_id: ${{ secrets.NOTIFY_DEVICE_ID }}
+          token: ${{ secrets.NOTIFY_DEVICE_TOKEN }}
+          github_token: ${{ github.token }}
       - name: Stream simulator to localhost
         shell: bash
         run: |
@@ -186,6 +227,14 @@ jobs:
           done
           [[ "$READY" == "true" ]] || { cat /tmp/serve-sim.log; exit 1; }
 
+      - name: Live Activity · refresh
+        uses: davidpovarsky/github-automation/live-refresh@main
+        continue-on-error: true
+        with:
+          event: refresh
+          device_id: ${{ secrets.NOTIFY_DEVICE_ID }}
+          token: ${{ secrets.NOTIFY_DEVICE_TOKEN }}
+          github_token: ${{ github.token }}
       - name: Add temporary authentication
         id: auth
         shell: bash
@@ -215,6 +264,14 @@ jobs:
           echo "username=$USERNAME" >> "$GITHUB_OUTPUT"
           echo "password=$PASSWORD" >> "$GITHUB_OUTPUT"
 
+      - name: Live Activity · refresh
+        uses: davidpovarsky/github-automation/live-refresh@main
+        continue-on-error: true
+        with:
+          event: refresh
+          device_id: ${{ secrets.NOTIFY_DEVICE_ID }}
+          token: ${{ secrets.NOTIFY_DEVICE_TOKEN }}
+          github_token: ${{ github.token }}
       - name: Create temporary browser link
         id: tunnel
         shell: bash
@@ -250,6 +307,14 @@ jobs:
             echo "> Real Apple iOS Simulator. Link and credentials expire when this workflow stops."
           } >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Live Activity · refresh
+        uses: davidpovarsky/github-automation/live-refresh@main
+        continue-on-error: true
+        with:
+          event: refresh
+          device_id: ${{ secrets.NOTIFY_DEVICE_ID }}
+          token: ${{ secrets.NOTIFY_DEVICE_TOKEN }}
+          github_token: ${{ github.token }}
       - name: Verify public preview
         shell: bash
         run: |
@@ -266,6 +331,14 @@ jobs:
           done
           exit 1
 
+      - name: Live Activity · refresh
+        uses: davidpovarsky/github-automation/live-refresh@main
+        continue-on-error: true
+        with:
+          event: refresh
+          device_id: ${{ secrets.NOTIFY_DEVICE_ID }}
+          token: ${{ secrets.NOTIFY_DEVICE_TOKEN }}
+          github_token: ${{ github.token }}
       - name: Keep preview live
         shell: bash
         run: |
@@ -277,6 +350,15 @@ jobs:
           echo "Keeping live preview open for $MINUTES minutes. Cancel the workflow when finished."
           sleep "$((MINUTES * 60))"
 
+      - name: Live Activity · refresh
+        if: failure()
+        uses: davidpovarsky/github-automation/live-refresh@main
+        continue-on-error: true
+        with:
+          event: refresh
+          device_id: ${{ secrets.NOTIFY_DEVICE_ID }}
+          token: ${{ secrets.NOTIFY_DEVICE_TOKEN }}
+          github_token: ${{ github.token }}
       - name: Diagnostics on failure
         if: failure()
         shell: bash
